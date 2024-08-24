@@ -1,0 +1,223 @@
+version: '3'
+volumes:
+  esdata:
+    driver: local
+  graylogdata:
+    driver: local
+  mongodata:
+    driver: local
+
+services:
+
+
+  syspass:
+    image: syspass/syspass:latest
+    container_name: syspass
+    ports:
+      - "9100:80"
+    environment:
+      DB_HOST: syspass-db
+      DB_USER: syspass
+      DB_PASSWORD: syspasspassword
+      DB_NAME: syspass
+    volumes:
+      - ./syspass/config/conf:/var/www/html/sysPass/app/config
+      - ./syspass/config/backup:/var/www/html/sysPass/app/backup
+    depends_on:
+      - db
+    networks:
+      - webnet
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-proxy/certs:/etc/nginx/certs:ro  # Para certificados SSL, se necessário
+    depends_on:
+      - grafana
+    networks:
+      - webnet
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin  # Alterar para uma senha segura
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana:/var/lib/grafana
+      - ./grafana/ldap.toml:/etc/grafana/ldap.toml
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini
+    networks:
+      - webnet
+
+  nexus:
+    image: sonatype/nexus3:latest
+    container_name: nexus
+    ports:
+      - "8081:8081"
+    volumes:
+      - /apps/nexus:/nexus-data
+    restart: always
+    networks:
+      - webnet
+
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    ports:
+     - "53:53/tcp"
+     - "53:53/udp"
+     - "8083:80/tcp"
+    environment:
+      TZ: 'America/Chicago'
+      WEBPASSWORD: Eadm@3326
+    volumes:
+      - ./pihole/etc-pihole:/etc/pihole
+      - ./pihole/etc-dnsmasq.d:/etc/dnsmasq.d
+    networks:
+      - webnet
+
+
+  db:
+    image: mariadb:latest
+    container_name: syspass-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: syspass
+      MYSQL_USER: syspass
+      MYSQL_PASSWORD: syspasspassword
+    volumes:
+      - ./mariadb/mysql:/var/lib/mysql
+    networks:
+      - webnet
+
+  dbmapos:
+    image: mysql:5.7
+    container_name: mapos-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: mapos
+      MYSQL_USER: mapos_user
+      MYSQL_PASSWORD: mapos_password
+    volumes:
+      - ./dbmapos:/var/lib/mysql
+    networks:
+      - webnet
+
+  php-fpm:
+    container_name: php-fpm
+    build:
+      context: ./mapos/docker/etc/php
+      dockerfile: Dockerfile
+    restart: always
+    volumes:
+      - ./mapos/etc/php/php.ini:/usr/local/etc/php/conf.d/php.ini
+      - ./mapos/etc/php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
+      - ./mapos:/var/www/html
+    networks:
+      - webnet
+    command: php -S 0.0.0.0:8000 -t /var/www/html
+
+  composer:
+    container_name: composer
+    build:
+      context: ./mapos/docker/etc/composer
+      dockerfile: Dockerfile
+    volumes:
+      - ./mapos:/app
+    command: install --ignore-platform-reqs --no-scripts
+    networks:
+      - webnet
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: phpmyadmin
+    ports:
+      - 8084:80
+    environment:
+      - PMA_ARBITRARY=1
+      - PMA_HOST=mapos-db
+      - PMA_USER=mapos_user
+      - PMA_PASSWORD=mapos_password
+    restart: always
+    networks:
+      - webnet
+
+  #mongodb:
+   # image: mongo:6.0.14
+    #volumes:
+     # - ./mongo_data:/data/db
+
+  mongodb:
+    image: mongo:3
+    command: mongod --config /conf/mongo.conf
+    volumes:
+      - mongodata:/data
+      - ./graylog-compose/mongo:/conf/
+
+  elasticsearch:
+    image: elasticsearch:2
+    command: elasticsearch -Des.cluster.name=graylog
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+      - ./graylog-compose/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      - ./graylog-compose/elasticsearch/logging.yml:/usr/share/elasticsearch/config/logging.yml:ro
+    environment:
+      ES_MAX_MEM: 1g
+    ports:
+     - 9200:9200
+     - 9300:9300
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    mem_limit: 1536m
+
+  graylog:
+    image: graylog2/server:latest
+    environment:
+      GRAYLOG_PASSWORD_SECRET: Bgw7mYROifuwMCojIcuQ0PYCiuwtOWNSIQBV6fbIfNIzpFFxKrVcRDOxJOPBmjHPhOA5uT928Ll9LlfpPEWxsy9a4VSgZebo
+      GRAYLOG_ROOT_PASSWORD_SHA2: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8
+      GRAYLOG_WEB_ENDPOINT_URI: http://192.168.62.59:9000/api
+      GRAYLOG_MONGODB_URI: mongodb://mongodb.service/graylog
+      GRAYLOG_MONGODB_MAX_CONNECTIONS: 100
+      GRAYLOG_MONGODB_THREADS_ALLOWED_TO_BLOCK_MULTIPLIER: 5
+      GRAYLOG_ELASTICSEARCH_CLUSTER_NAME: graylog
+    volumes:
+      - graylogdata:/opt/graylog/data
+      - ./graylog-compose/plugin/:/opt/graylog/plugin/
+    links:
+      - elasticsearch:elasticsearch
+      - mongodb:mongodb.service
+    ports:
+      - 9000:9000
+      - 12201:12201/udp
+      - 1514:1514/udp
+
+
+  logspout:
+    image: micahhausler/logspout:gelf
+    hostname: logspout
+    command: gelf://graylog:12201
+    environment:
+      LOGSPOUT: ignore
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    links:
+      - graylog:graylog
+    ports:
+      - 8000:80
+
+
+networks:
+  webnet:
+
